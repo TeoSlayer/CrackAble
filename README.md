@@ -54,4 +54,4 @@ A Next.js application that crawls a given URL using Puppeteer, extracts all Java
 
 ## License
 
-MIT © Teodor Ioan Calin
+MIT © Teoslayer
