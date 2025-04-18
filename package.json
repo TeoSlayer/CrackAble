@@ -5,13 +5,15 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p 8080",
     "lint": "next lint"
   },
   "dependencies": {
+    "@sparticuz/chromium-min": "^133.0.0",
     "feather-icons": "^4.29.2",
     "next": "15.3.1",
     "puppeteer": "^24.6.1",
+    "puppeteer-core": "^24.6.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
