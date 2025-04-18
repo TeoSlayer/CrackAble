@@ -1,40 +1,57 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/pages/api-reference/create-next-app).
+# CrackAble Security Scanner
 
-## Getting Started
+A Next.js application that crawls a given URL using Puppeteer, extracts all JavaScript (external, inline, event-handlers, eval), and scans the code for potential secrets (API keys, tokens, database URIs) and insecure API patterns (HTTP endpoints, exposed credentials, CORS misconfigurations, etc.). The UI mimics a chat interface for an intuitive, conversational scan experience.
 
-First, run the development server:
+## Features
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+- **Headless Puppeteer crawler** to capture:
+  - External scripts
+  - Inline scripts (initial & dynamic)
+  - Event-handler code
+  - Eval-generated scripts
+- **Regex-based detection** for:
+  - OpenAI, AWS, Google API keys
+  - Database URIs (MongoDB, Postgres)
+  - JWTs, Basic Auth, Twitter/Facebook tokens
+  - Stripe/PayPal credentials
+  - Generic secrets via environment-style patterns
+- **Insecure API patterns** (HTTP, URL keys, default creds, etc.)
+- **Per-IP rate limit** (1 scan per minute)
+- **Chat-style frontend** built with Next & Tailwind CSS
+- **“Show Info” panel** listing all applied regex patterns
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Installation
 
-You can start editing the page by modifying `pages/index.js`. The page auto-updates as you edit the file.
+1. Clone the repo
+2. Install dependencies
+3. Run in development mode
+4. Open your browser at `http://localhost:3000`
 
-[API routes](https://nextjs.org/docs/pages/building-your-application/routing/api-routes) can be accessed on [http://localhost:3000/api/hello](http://localhost:3000/api/hello). This endpoint can be edited in `pages/api/hello.js`.
+## Usage
 
-The `pages/api` directory is mapped to `/api/*`. Files in this directory are treated as [API routes](https://nextjs.org/docs/pages/building-your-application/routing/api-routes) instead of React pages.
+1. Paste the target URL into the input at the bottom.
+2. Hit **Scan**.
+3. View findings in the chat window:
+   - **Secrets Detected**: red bubbles with key type, line number, masked match
+   - **API Issues Detected**: yellow bubbles with issue type, severity, match.(May not always represent a vulnerability)
+4. Toggle **“Show Info”** to inspect the exact regex rules powering the scan.
 
-This project uses [`next/font`](https://nextjs.org/docs/pages/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Configuration
 
-## Learn More
+- Regex rules live in `utils/regex-rules.js`
+- Rate limiting enforced in the `pages/api/extract.js`
 
-To learn more about Next.js, take a look at the following resources:
+## Deployment
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn-pages-router) - an interactive Next.js tutorial.
+1. Ensure the hosting environment supports Puppeteer’s Chromium binary and allows `--no-sandbox`.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Contributing
 
-## Deploy on Vercel
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/...`)
+3. Commit your changes (`git commit -m "feat: ..."`)
+4. Push to your fork and open a PR
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## License
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/pages/building-your-application/deploying) for more details.
+MIT © Teodor Ioan Calin
