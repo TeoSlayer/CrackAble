@@ -1,7 +1,64 @@
 import puppeteer from "puppeteer";
 import { KEY_PATTERNS, WHITELIST, INSECURE_API_PATTERNS } from '../../utils/regex-rules.js';
 
+const MAX_BROWSERS = 8;
+const BROWSER_TIMEOUT = 30000;
+const PAGE_TIMEOUT = 20000;
+const RATE_LIMIT_WINDOW = 60000;
+
+const browserPool = {
+    instances: [],
+    pending: [],
+    activeCount: 0,
+
+    async getBrowser() {
+        if (this.instances.length > 0) {
+            return this.instances.pop();
+        }
+
+        if (this.activeCount < MAX_BROWSERS) {
+            this.activeCount++;
+            try {
+                return await puppeteer.launch({
+                    headless: true,
+                    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser',
+                    args: [
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--single-process'
+                    ],
+                    timeout: BROWSER_TIMEOUT
+                });
+            } catch (error) {
+                this.activeCount--;
+                throw error;
+            }
+        }
+
+        return new Promise(resolve => this.pending.push(resolve));
+    },
+
+    releaseBrowser(browser) {
+        if (this.pending.length > 0) {
+            const resolve = this.pending.shift();
+            resolve(browser);
+        } else {
+            this.instances.push(browser);
+        }
+    }
+};
+
 const rateLimitMap = new Map();
+setInterval(() => {
+    const now = Date.now();
+    for (const [ip, timestamp] of rateLimitMap.entries()) {
+        if (now - timestamp > RATE_LIMIT_WINDOW * 2) {
+            rateLimitMap.delete(ip);
+        }
+    }
+}, 3600000);
+
 
 function scanForSecurityIssues(content) {
     const secretFindings = scanForSecrets(content);
@@ -83,10 +140,10 @@ function getContext(lines, lineNumber, contextLines = 2) {
 
 export default async function handler(req, res) {
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
-    const lastRequest = rateLimitMap.get(ip) || 0;
     const now = Date.now();
-    if (now - lastRequest < 60_000) {
-        return res.status(429).json({ error: 'Too many requests. Please chill. You have 1(one) per minute. Let some go around...' });
+
+    if (rateLimitMap.has(ip) && now - rateLimitMap.get(ip) < RATE_LIMIT_WINDOW) {
+        return res.status(429).json({ error: 'Too many requests. Please wait 1 minute between scans.' });
     }
     rateLimitMap.set(ip, now);
 
@@ -94,114 +151,154 @@ export default async function handler(req, res) {
         const { url } = req.body;
         if (!url) return res.status(400).json({ error: 'URL required' });
 
-        const browser = await puppeteer.launch({
-            headless: 'new',
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser',
-        });
-
+        const browser = await browserPool.getBrowser();
         const page = await browser.newPage();
-        const scripts = {
-            external: [],
-            inline: [],
-            handlers: [],
-            dynamic: []
-        };
 
-        await page.setRequestInterception(true);
-        page.on('request', request => {
-            if (request.resourceType() === 'script') {
-                scripts.external.push({
-                    url: request.url(),
-                    status: 'pending',
-                    content: null
-                });
-            }
-            request.continue();
-        });
+        try {
+            await page.setDefaultNavigationTimeout(PAGE_TIMEOUT);
+            const scripts = await collectScripts(page, url);
+            const securityReport = scanForSecurityIssues(scripts);
 
-        page.on('response', async response => {
-            if (response.request().resourceType() === 'script') {
-                const script = scripts.external.find(s => s.url === response.url());
-                if (script) {
-                    try {
-                        script.content = await response.text();
-                        script.status = 'loaded';
-                    } catch (error) {
-                        script.status = 'error';
-                        script.error = error.message;
-                    }
+            const compressedResults = {
+                secrets: securityReport.secrets.map(secret => ({
+                    line: secret.line,
+                    keyType: secret.keyType,
+                    snippet: secret.match,
+                    context: secret.context,
+                })),
+                apiIssues: securityReport.apiIssues.map(issue => ({
+                    line: issue.line,
+                    issueType: issue.issueType,
+                    severity: issue.severity,
+                    snippet: truncateSnippet(issue.match, 40)
+                })),
+                metadata: {
+                    scannedUrl: url,
+                    scannedAt: new Date().toISOString(),
+                    totalSecrets: securityReport.secrets.length,
+                    totalApiIssues: securityReport.apiIssues.length
                 }
-            }
-        });
+            };
 
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-        await page.waitForNetworkIdle({ idleTime: 2000, timeout: 30000 });
+            res.json({
+                success: true,
+                ...compressedResults
+            });
 
-        const currentScripts = await page.$$eval('script', allScripts =>
-            allScripts.map(script => ({
-                isDynamic: !script.hasAttribute('data-initial'),
-                src: script.src || null,
-                content: script.innerHTML
-            }))
-        );
-
-        scripts.inline = currentScripts
-            .filter(script => !script.src)
-            .map(script => ({
-                type: script.isDynamic ? 'dynamic-inline' : 'initial-inline',
-                content: script.content
-            }));
-
-        scripts.handlers = await page.$$eval('*', elements =>
-            elements.flatMap(element =>
-                Array.from(element.attributes)
-                    .filter(attr => attr.name.startsWith('on'))
-                    .map(attr => ({
-                        tag: element.tagName.toLowerCase(),
-                        event: attr.name,
-                        handler: attr.value
-                    }))
-            )
-        );
-
-        const evalScripts = await page.evaluate(() => {
-            return Array.from(document.querySelectorAll('script[data-eval]'))
-                .map(script => script.innerHTML);
-        });
-
-        scripts.dynamic = evalScripts.map(content => ({
-            type: 'eval-generated',
-            content
-        }));
-
-        const allScripts = [
-            ...scripts.external.filter(script => script.status === 'loaded').map(script => script.content),
-            ...scripts.inline.map(script => script.content),
-            ...scripts.handlers.map(handler => handler.handler),
-            ...scripts.dynamic.map(script => script.content)
-        ].join('\n');
-
-        if (!allScripts || allScripts.length === 0) {
-            throw new Error('No JavaScript content found');
+        } finally {
+            await page.close().catch(() => { });
+            browserPool.releaseBrowser(browser);
         }
-
-        const securityReport = scanForSecurityIssues(allScripts);
-
-        await browser.close();
-
-        res.json({
-            success: true,
-            ...securityReport,
-            scannedUrl: url,
-            scannedAt: new Date().toISOString()
-        });
-
     } catch (error) {
         console.error('Scan error:', error);
         res.status(500).json({
             error: error.message || 'An error occurred during the scan'
         });
     }
+}
+
+function truncateSnippet(text, maxLength = 40) {
+    if (text.length <= maxLength) return anonymizeMatch(text);
+    return text.substring(0, maxLength) + '...';
+}
+
+async function collectScripts(page, url) {
+    const scripts = {
+        external: [],
+        inline: [],
+        handlers: [],
+        dynamic: []
+    };
+
+    await page.setRequestInterception(true);
+    page.on('request', handleRequest(scripts));
+    page.on('response', handleResponse(scripts));
+
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await page.waitForNetworkIdle({ idleTime: 2000 });
+
+    const [inlineScripts, handlers, evalScripts] = await Promise.all([
+        collectInlineScripts(page),
+        collectEventHandlers(page),
+        collectEvalScripts(page)
+    ]);
+
+    scripts.inline = inlineScripts;
+    scripts.handlers = handlers;
+    scripts.dynamic = evalScripts;
+
+    return [
+        ...scripts.external.filter(s => s.status === 'loaded').map(s => s.content),
+        ...scripts.inline.map(s => s.content),
+        ...scripts.handlers.map(h => h.handler),
+        ...scripts.dynamic.map(s => s.content)
+    ].join('\n');
+}
+
+const handleRequest = (scripts) => (request) => {
+    if (request.resourceType() === 'script') {
+        scripts.external.push({
+            url: request.url(),
+            status: 'pending',
+            content: null
+        });
+    }
+    request.continue();
+};
+
+const handleResponse = (scripts) => async (response) => {
+    if (response.request().resourceType() === 'script') {
+        const script = scripts.external.find(s => s.url === response.url());
+        if (script) {
+            try {
+                script.content = await response.text();
+                script.status = 'loaded';
+            } catch (error) {
+                script.status = 'error';
+                script.error = error.message;
+            }
+        }
+    }
+};
+
+async function collectInlineScripts(page) {
+    const scripts = await page.$$eval('script', allScripts =>
+        allScripts.map(script => ({
+            isDynamic: !script.hasAttribute('data-initial'),
+            src: script.src || null,
+            content: script.innerHTML
+        }))
+    );
+    return scripts
+        .filter(script => !script.src)
+        .map(script => ({
+            type: script.isDynamic ? 'dynamic-inline' : 'initial-inline',
+            content: script.content
+        }));
+}
+
+async function collectEventHandlers(page) {
+    return page.$$eval('*', elements =>
+        elements.flatMap(element =>
+            Array.from(element.attributes)
+                .filter(attr => attr.name.startsWith('on'))
+                .map(attr => ({
+                    tag: element.tagName.toLowerCase(),
+                    event: attr.name,
+                    handler: attr.value
+                }))
+        )
+    );
+}
+
+async function collectEvalScripts(page) {
+    const evalContent = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('script[data-eval]'))
+            .map(script => script.innerHTML)
+    );
+    return evalContent.map(content => ({
+        type: 'eval-generated',
+        content
+    }));
 }

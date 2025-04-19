@@ -113,7 +113,7 @@ export default function SecurityScanner() {
                   <ul className="space-y-2">
                     {scanResult.secrets.map((s, i) => (
                       <li key={i} className="bg-red-50 p-2 rounded">
-                        <strong>Line {s.line}</strong> — {s.keyType}: <code className="text-sm">{s.match}</code>
+                        <strong>Line {s.line}</strong> — {s.keyType}: <code className="text-sm">{s.snippet}</code>
                       </li>
                     ))}
                   </ul>
@@ -134,7 +134,7 @@ export default function SecurityScanner() {
                     {scanResult.apiIssues.map((i, idx) => (
                       <li key={idx} className="bg-yellow-50 p-2 rounded">
                         <strong>Line {i.line}</strong> — {i.issueType} <span className="text-xs text-gray-500">({i.severity})</span><br />
-                        <code className="text-sm">{i.match}</code>
+                        <code className="text-sm">{i.snippet}</code>
                       </li>
                     ))}
                   </ul>
